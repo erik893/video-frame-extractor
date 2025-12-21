@@ -192,10 +192,10 @@ def extract_and_save(req: ExtractReq):
         frames_dir = os.path.join(td, "frames")
         os.makedirs(frames_dir, exist_ok=True)
 
-        # 1) Download video
+        # 1) Video herunterladen
         download_drive_video(req.fileId, video_path)
 
-        # 2) Extract frames
+        # 2) Frames extrahieren
         frame_files, dur = extract_frames(
             video_path,
             frames_dir,
@@ -204,16 +204,13 @@ def extract_and_save(req: ExtractReq):
             req.max_width,
         )
 
-        # 3) Find parent folder of the video
-        parent_folder_id = get_video_parent_folder(req.fileId)
-
-        # 4) Upload frames into SAME folder as the video
+        # 3) Frames IMMER in festen Zielordner hochladen
         ids = []
         for i, fp in enumerate(frame_files):
             with open(fp, "rb") as f:
                 ids.append(
                     upload_jpg(
-                        parent_folder_id,
+                        FRAMES_TARGET_FOLDER_ID,
                         f"{req.fileId}_frame_{i:03d}.jpg",
                         f.read(),
                     )
@@ -222,6 +219,6 @@ def extract_and_save(req: ExtractReq):
         return {
             "videoId": req.fileId,
             "durationSec": dur,
+            "savedToFolderId": FRAMES_TARGET_FOLDER_ID,
             "frameFileIds": ids,
-            "savedToFolderId": parent_folder_id
         }
