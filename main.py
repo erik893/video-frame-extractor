@@ -1,4 +1,6 @@
 import os, json, tempfile, subprocess, uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -70,7 +72,7 @@ def count_media(req: CountReq):
 
 
 # ======================================================================
-# 2) EXTRACT FRAMES FROM ONE VIDEO AND SAVE THEM INTO FIXED FOLDER
+# 2) EXTRACT FRAMES (SINGLE VIDEO) -> FIXED DRIVE FOLDER
 # ======================================================================
 class ExtractReq(BaseModel):
     fileId: str
@@ -93,8 +95,8 @@ def download_drive_video(file_id: str, out_path: str):
 
 def probe_duration(video_path: str) -> float:
     p = subprocess.run(
-        ["ffprobe","-v","error","-show_entries","format=duration",
-         "-of","default=noprint_wrappers=1:nokey=1", video_path],
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", video_path],
         capture_output=True, text=True
     )
     try:
@@ -123,12 +125,12 @@ def extract_frames(video_path: str, frames_dir: str, n: int, min_gap: float, max
         vf = f"scale='min({max_width},iw)':-2"
 
         subprocess.run(
-            ["ffmpeg","-hide_banner","-loglevel","error",
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
              "-ss", str(max(0.0, t)),
              "-i", video_path,
-             "-frames:v","1",
+             "-frames:v", "1",
              "-vf", vf,
-             "-q:v","3",
+             "-q:v", "3",
              out],
             check=False
         )
@@ -169,40 +171,86 @@ def upload_jpg(folder_id: str, filename: str, jpg_bytes: bytes) -> str:
 
     return r.json()["id"]
 
-@app.post("/extract-and-save")
-def extract_and_save(req: ExtractReq):
+def process_one_video(file_id: str, frames: int, min_gap_sec: float, max_width: int):
+    """
+    Lädt ein Video runter, extrahiert Frames, lädt Frames in TARGET_FRAMES_FOLDER_ID hoch.
+    Gibt Ergebnis zurück (oder wirft Exception).
+    """
     with tempfile.TemporaryDirectory() as td:
         video_path = os.path.join(td, "video.mp4")
         frames_dir = os.path.join(td, "frames")
         os.makedirs(frames_dir, exist_ok=True)
 
-        # 1) Video herunterladen
-        download_drive_video(req.fileId, video_path)
+        download_drive_video(file_id, video_path)
 
-        # 2) Frames extrahieren
         frame_files, dur = extract_frames(
             video_path,
             frames_dir,
-            req.frames,
-            req.min_gap_sec,
-            req.max_width,
+            frames,
+            min_gap_sec,
+            max_width,
         )
 
-        # 3) Frames IMMER in den festen Zielordner hochladen
         ids = []
         for i, fp in enumerate(frame_files):
             with open(fp, "rb") as f:
                 ids.append(
                     upload_jpg(
                         TARGET_FRAMES_FOLDER_ID,
-                        f"{req.fileId}_frame_{i:03d}.jpg",
+                        f"{file_id}_frame_{i:03d}.jpg",
                         f.read(),
                     )
                 )
 
         return {
-            "videoId": req.fileId,
+            "videoId": file_id,
             "durationSec": dur,
             "frameFileIds": ids,
             "savedToFolderId": TARGET_FRAMES_FOLDER_ID,
         }
+
+@app.post("/extract-and-save")
+def extract_and_save(req: ExtractReq):
+    # Single = einfach den Worker nutzen
+    return process_one_video(req.fileId, req.frames, req.min_gap_sec, req.max_width)
+
+
+# ======================================================================
+# 3) PARALLEL BATCH ENDPOINT
+# ======================================================================
+class BatchReq(BaseModel):
+    fileIds: list[str]
+    concurrency: int = 5     # wie viele Videos parallel
+    frames: int = 20
+    min_gap_sec: float = 2.0
+    max_width: int = 640
+
+@app.post("/extract-batch")
+def extract_batch(req: BatchReq):
+    # Sicherheitslimits
+    file_ids = (req.fileIds or [])[:50]        # max 50 pro Request
+    workers = max(1, min(int(req.concurrency), 10))  # max 10 parallel
+
+    results = []
+    errors = []
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {
+            ex.submit(process_one_video, fid, req.frames, req.min_gap_sec, req.max_width): fid
+            for fid in file_ids
+        }
+        for fut in as_completed(futures):
+            fid = futures[fut]
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                errors.append({"videoId": fid, "error": str(e)})
+
+    return {
+        "requested": len(req.fileIds or []),
+        "processed": len(file_ids),
+        "concurrency": workers,
+        "savedToFolderId": TARGET_FRAMES_FOLDER_ID,
+        "ok": results,
+        "errors": errors,
+    }
