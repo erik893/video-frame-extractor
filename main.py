@@ -3,8 +3,10 @@ import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-
 app = FastAPI()
+
+# ✅ FIXER Zielordner für Frames (dein Link)
+TARGET_FRAMES_FOLDER_ID = "12HHyBair9O6ZK950qGrNn3bBDMiv1uK4"
 
 # --------- Shared: Cloud Run -> OAuth token via metadata server ----------
 def _access_token():
@@ -68,7 +70,7 @@ def count_media(req: CountReq):
 
 
 # ======================================================================
-# 2) EXTRACT FRAMES FROM ONE VIDEO AND SAVE FRAMES IN THE SAME FOLDER
+# 2) EXTRACT FRAMES FROM ONE VIDEO AND SAVE THEM INTO FIXED FOLDER
 # ======================================================================
 class ExtractReq(BaseModel):
     fileId: str
@@ -135,24 +137,6 @@ def extract_frames(video_path: str, frames_dir: str, n: int, min_gap: float, max
 
     return out_files, dur
 
-def get_video_parent_folder(file_id: str) -> str:
-    token = _access_token()
-    url = f"https://www.googleapis.com/drive/v3/files/{file_id}"
-    params = {
-        "fields": "parents",
-        "supportsAllDrives": "true",
-    }
-
-    r = requests.get(url, headers=_auth_hdr(token), params=params, timeout=20)
-    if r.status_code >= 300:
-        raise HTTPException(r.status_code, f"Cannot read video metadata: {r.text}")
-
-    parents = r.json().get("parents", [])
-    if not parents:
-        raise HTTPException(400, "Video has no parent folder (cannot decide where to store frames)")
-
-    return parents[0]
-
 def upload_jpg(folder_id: str, filename: str, jpg_bytes: bytes) -> str:
     token = _access_token()
     boundary = "====BOUNDARY" + uuid.uuid4().hex
@@ -204,13 +188,13 @@ def extract_and_save(req: ExtractReq):
             req.max_width,
         )
 
-        # 3) Frames IMMER in festen Zielordner hochladen
+        # 3) Frames IMMER in den festen Zielordner hochladen
         ids = []
         for i, fp in enumerate(frame_files):
             with open(fp, "rb") as f:
                 ids.append(
                     upload_jpg(
-                        FRAMES_TARGET_FOLDER_ID,
+                        TARGET_FRAMES_FOLDER_ID,
                         f"{req.fileId}_frame_{i:03d}.jpg",
                         f.read(),
                     )
@@ -219,6 +203,6 @@ def extract_and_save(req: ExtractReq):
         return {
             "videoId": req.fileId,
             "durationSec": dur,
-            "savedToFolderId": FRAMES_TARGET_FOLDER_ID,
             "frameFileIds": ids,
+            "savedToFolderId": TARGET_FRAMES_FOLDER_ID,
         }
