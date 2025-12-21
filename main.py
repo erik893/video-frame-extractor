@@ -3,6 +3,7 @@ import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+
 app = FastAPI()
 
 # --------- Shared: Cloud Run -> OAuth token via metadata server ----------
